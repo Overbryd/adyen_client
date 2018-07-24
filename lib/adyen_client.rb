@@ -6,6 +6,7 @@ require "httparty"
 class AdyenClient
   include HTTParty
 
+  ADYEN_API_VERSION = "v30"
   # Internal: Access the configuration instance.
   def self.configuration
     @configuration ||= Configuration.new
@@ -84,10 +85,14 @@ class AdyenClient
   # :currency            - Use a specific 3-letter currency code. (default: set by the instance or configuration default currency)
   # :statement           - Supply a statement that should be shown on the customers credit card bill. (default: "")
   #                        Note however that most card issues allow for not more than 22 characters.
+  # :recurring_processing_model - Added in v30 of the Adyen API and required by Visa as of April 2018. One of "Subscription" or "CardOnFile". Defaults to "CardOnFile").
   #
   # Returns an AdyenClient::Response or your specific response implementation.
-  def authorise_recurring_payment(reference:, shopper_reference:, amount:, recurring_reference: "LATEST", merchant_account: @merchant_account, currency: configuration.default_currency, statement: "")
-    postJSON("/Payment/v12/authorise",
+def authorise_recurring_payment(reference:, shopper_reference:, amount:, recurring_reference: "LATEST", merchant_account: @merchant_account, currency: @currency, statement: "", recurring_processing_model: "CardOnFile")
+    unless %w(Subscription CardOnFile).include?(recurring_processing_model)
+      raise ArgumentError, 'invalid recurring_processing_model'
+    end
+    postJSON("/Payment/#{ADYEN_API_VERSION}/authorise",
       reference: reference,
       amount: { value: amount, currency: currency },
       merchantAccount: merchant_account,
@@ -96,7 +101,8 @@ class AdyenClient
       selectedRecurringDetailReference: recurring_reference,
       selectedBrand: "",
       recurring: { contract: "RECURRING" },
-      shopperInteraction: "ContAuth"
+      shopperInteraction: "ContAuth",
+      recurringProcessingModel: recurring_processing_model
     )
   end
   alias_method :authorize_recurring_payment, :authorise_recurring_payment
@@ -109,7 +115,7 @@ class AdyenClient
   #
   # Returns an AdyenClient::Response or your specific response implementation.
   def list_recurring_details(shopper_reference:, merchant_account: @merchant_account, contract: "RECURRING")
-    postJSON("/Recurring/v12/listRecurringDetails",
+    postJSON("/Recurring/#{ADYEN_API_VERSION}/listRecurringDetails",
       shopperReference: shopper_reference,
       recurring: { contract: contract },
       merchantAccount: merchant_account
@@ -132,7 +138,7 @@ class AdyenClient
   #
   # Returns an AdyenClient::Response or your specific response implementation.
   def create_recurring_contract(encrypted_card:, reference:, shopper:, merchant_account: @merchant_account, currency: @currency)
-    postJSON("/Payment/v12/authorise",
+    postJSON("/Payment/#{ADYEN_API_VERSION}/authorise",
       reference: reference,
       additionalData: { "card.encrypted.json": encrypted_card },
       amount: { value: 0, currency: currency },
@@ -162,7 +168,7 @@ class AdyenClient
   #
   # Returns an AdyenClient::Response or your specific response implementation.
   def authorise(encrypted_card:, amount:, reference:, merchant_account: @merchant_account, currency: @currency, shopper: {}, statement: "")
-    postJSON("/Payment/v12/authorise",
+    postJSON("/Payment/#{ADYEN_API_VERSION}/authorise",
       reference: reference,
       amount: { value: amount, currency: currency },
       merchantAccount: merchant_account,
@@ -193,7 +199,7 @@ class AdyenClient
   #
   # Returns an AdyenClient::Response or your specific response implementation.
   def verify(encrypted_card:, reference:, amount: 0, merchant_account: @merchant_account, currency: @currency, shopper: {}, statement: "")
-    postJSON("/Payment/v12/authorise",
+    postJSON("/Payment/#{ADYEN_API_VERSION}/authorise",
       reference: reference,
       amount: { value: 0, currency: currency },
       additionalAmount: { value: amount, currency: currency },
@@ -208,13 +214,32 @@ class AdyenClient
 
   # Public: Cancels a credit card transaction.
   #
+  # :original_reference   - The psp_reference from Adyen for this transaction.
+  # :reference            - Your reference id for this transaction.
+  # :modification_amount  - The amount to capture.
+  #                         :currency   - Must match currency used in authorisation request.
+  #                         :value      - Must be smaller than or equal to the authorised amount.
+  # :merchant_account     - Use a specific merchant account for this transaction (default: set by the instance or configuration default merchant account).
+  #
+  # Returns an AdyenClient::Response or your specific response implementation.
+  def capture(original_reference:, reference:, modification_amount:, merchant_account: @merchant_account)
+    postJSON("/Payment/#{ADYEN_API_VERSION}/capture",
+      reference: reference,
+      merchantAccount: merchant_account,
+      modificationAmount: modification_amount,
+      originalReference: original_reference
+    )
+  end
+
+  # Public: Cancels a credit card transaction.
+  #
   # :original_reference - The psp_reference from Adyen for this transaction.
   # :reference          - Your reference id for this transaction.
   # :merchant_account   - Use a specific merchant account for this transaction (default: set by the instance or configuration default merchant account).
   #
   # Returns an AdyenClient::Response or your specific response implementation.
-  def cancel(original_reference:, reference:, merchantAccount: @merchant_account)
-    postJSON("/Payment/v12/cancel",
+  def cancel(original_reference:, reference:, merchant_account: @merchant_account)
+    postJSON("/Payment/#{ADYEN_API_VERSION}/cancel",
       reference: reference,
       merchantAccount: merchant_account,
       originalReference: original_reference
@@ -230,8 +255,8 @@ class AdyenClient
   # :currency           - Use a specific 3-letter currency code (default: set by the instance or configuration default currency).
   #
   # Returns an AdyenClient::Response or your specific response implementation.
-  def refund(original_reference:, amount:, reference:, merchantAccount: @merchant_account, currency: @currency)
-    postJSON("/Payment/v12/refund",
+  def refund(original_reference:, amount:, reference:, merchant_account: @merchant_account, currency: @currency)
+    postJSON("/Payment/#{ADYEN_API_VERSION}/refund",
       reference: reference,
       merchantAccount: merchant_account,
       modificationAmount: { value: amount, currency: currency },
@@ -247,8 +272,110 @@ class AdyenClient
   #
   # Returns an AdyenClient::Response or your specific response implementation.
   def cancel_or_refund(original_reference:, reference:, merchantAccount: @merchant_account)
-    postJSON("/Payment/v12/cancelOrRefund",
+    postJSON("/Payment/#{ADYEN_API_VERSION}/cancelOrRefund",
       reference: reference,
+      merchantAccount: merchant_account,
+      originalReference: original_reference
+    )
+  end
+
+  # Public: Initiate Payout to an external bank. This class contains data that
+  #         should be passed in the /storeDetailAndSubmitThirdParty request to
+  #         initiate a payout.
+  # !! Important note: you need a special Adyen webservice user for this operation
+  #
+  # :reference          - Your reference id for this transaction.
+  # :amount             - The amount to payout in cents, Hash with value and currency
+  # :bank               - Bank information, Hash with
+  #            :bankName      - Name of the bank
+  #            :bic           - BIC (Swift)
+  #            :iban          - IBAN
+  #            :countryCode   - Country code where the bank is located.
+  #            :bankCity      - Name of the bank
+  #            :ownerName     - The name of the bank account holder. Non Latin letters get converted
+  #            :bankCity      - The bank city
+  #            :taxId         - The bank account holder's tax ID
+  # :receiver            - Receiver is the person who gets the money (called shopper in Adyen), Hash with
+  #            :email         - The receivers's email address
+  #            :reference     - The receivers's reference for the payment transaction
+  #            :firstName     - The first name
+  #            :lastName      - The last name
+  #            :gender        - The following values are permitted: MALE, FEMALE, UNKNOWN
+  #            :dateOfBirth   - BIC (Swift)
+  #            :nationality   - The receivers's nationality
+  # :billingAddress      - billing address
+  #            :houseNumber   - The number (or name) of the house
+  #            :street        - The name of the street
+  #            :city          - The name of the city
+  #            :stateOrProvince - The abbreviation of the state or province
+  #            :country       - The two-character country code of the address
+  #            :postalCode    - The postal code
+  # :merchant_account   - Use a specific merchant account for this transaction (default: set by the instance or configuration default merchant account).
+  #
+  # Returns an StoreDetailAndSubmitResponse
+  # If the message is syntactically valid and merchantAccount is correct, you receive a payout-submit-received response with the following fields:
+  # @see https://docs.adyen.com/api-explorer/#/Payout/v30/storeDetailAndSubmitThirdParty
+  def initiate_payout(reference:,
+                        amount: {
+                          value: 0,
+                          currency: @currency
+                        },
+                        bank: {},
+                        receiver: {},
+                        billingAddress: {},
+                        merchantAccount: @merchant_account)
+    postJSON("/Payout/#{ADYEN_API_VERSION}/storeDetailAndSubmitThirdParty",
+      merchantAccount: @merchant_account,
+      amount: {
+        value: amount[:value],
+        currency: amount[:currency]
+      },
+      recurring: {
+          contract: "RECURRING,PAYOUT"
+      },
+      reference: reference,
+      bank: {
+          bankName: bank[:bankName],
+          bic: bank[:bic],
+          countryCode: bank[:countryCode],
+          iban: bank[:iban],
+          ownerName: bank[:ownerName],
+          bankCity: bank[:bankCity],
+          taxId: bank[:taxId]
+      },
+      shopperEmail: receiver[:email],
+      shopperReference: receiver[:reference],
+      shopperName: {
+          firstName: receiver[:firstName],
+          lastName: receiver[:lastName],
+          gender: receiver[:gender]
+      },
+      dateOfBirth: receiver[:dateOfBirth],
+      entityType: "Person", #"Company"
+      nationality: receiver[:nationality],
+      billingAddress: {
+          houseNumberOrName: billingAddress[:houseNumber],
+          street: billingAddress[:street],
+          city: billingAddress[:city],
+          stateOrProvince: billingAddress[:stateOrProvince],
+          country: billingAddress[:country],
+          postalCode: billingAddress[:postalCode]
+      }
+    )
+  end
+
+
+  # Public: ConfirmPayout. Confirms a previously initated payout
+  #
+  # !! Important note: you need a special Adyen webservice user for this operation.
+  #                    It is NOT the same as for initiating the payout
+  #
+  # :original_reference - The psp_reference from Adyen for this transaction.
+  # :merchant_account   - Use a specific merchant account for this transaction (default: set by the instance or configuration default merchant account).
+  #
+  # Returns an AdyenClient::Response or your specific response implementation.
+  def confirm_payout(original_reference:, merchantAccount: @merchant_account)
+    postJSON("/Payout/#{ADYEN_API_VERSION}/confirmThirdParty",
       merchantAccount: merchant_account,
       originalReference: original_reference
     )
